@@ -1,0 +1,59 @@
+package bettyblocks:file@0.2.0;
+
+interface uploader {
+    use bettyblocks:data-api/data-api.{helper-context};
+    
+    /// Model information for the file property
+    record model {
+        name: string,
+    }
+    
+    /// Property information (should be FILE or IMAGE type)
+    record property {
+        name: string,
+    }
+    
+    /// Configuration for the upload operation
+    record upload-config {
+        /// Model containing the file property
+        model: model,
+        /// Property to store the file in (must be FILE or IMAGE type)
+        property: property,
+        /// Source URL to download the file from
+        source-url: string,
+        /// Optional headers for downloading from source URL
+        source-headers: option<list<tuple<string, string>>>,
+    }
+    
+    /// Result of a file upload operation
+    record upload-result {
+        /// File reference that can be used in create/update operations
+        reference: string,
+        /// Size of the uploaded file in bytes
+        file-size: u64,
+        /// Optional message with additional details
+        message: option<string>,
+    }
+    
+    /// Upload a file from source URL to the asset store
+    /// Returns a reference that can be used in create/update operations
+    upload: func(helper-context: helper-context, config: upload-config) -> result<upload-result, string>;
+}
+
+world file-upload {
+    // Import data-api to fetch presigned URLs
+    import bettyblocks:data-api/data-api;
+    
+    // Import WASI capabilities
+    import wasi:filesystem/types@0.2.0;
+    import wasi:filesystem/preopens@0.2.0;
+    import wasi:http/types@0.2.0;
+    import wasi:http/outgoing-handler@0.2.0;
+    import wasi:logging/logging;
+    
+    // Export HTTP handler for direct invocation
+    export wasi:http/incoming-handler@0.2.0;
+    
+    // Export uploader interface
+    export uploader;
+}
