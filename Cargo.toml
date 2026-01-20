@@ -5,11 +5,17 @@ version = "0.1.0"
 
 [workspace]
 
+[features]
+default = []  # or default = ["fs"] if you want it enabled by default
+fs = []
+
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 wasmcloud-component = "0.2.0"
 anyhow = "1"
+tracing = "0.1.44"
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 wit-bindgen = "0.47.0"
