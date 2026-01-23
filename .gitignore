@@ -3,3 +3,6 @@ target/
 
 # Wash build artifacts
 
+info.md
+
+signer.py

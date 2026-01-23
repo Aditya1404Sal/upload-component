@@ -7,9 +7,10 @@ mod bindings {
 }
 
 use bindings::{
-    bettyblocks::data_api::data_api::{self, HelperContext},
+    bettyblocks::data_api::data_api::HelperContext,
+    bettyblocks::data_api::data_api_utilities::{self, Field, PresignedUrl, Property},
     exports::bettyblocks::file::uploader::{
-        Guest as UploaderGuest, Model, Property, UploadConfig, UploadResult,
+        Guest as UploaderGuest, Model, UploadConfig, UploadResult,
     },
     exports::wasi::http::incoming_handler::Guest,
     wasi::{
@@ -24,14 +25,10 @@ use bindings::{
 
 use serde::Deserialize;
 
-#[cfg(feature = "fs")]
 use bindings::wasi::filesystem::{
     preopens::get_directories,
     types::{DescriptorFlags, OpenFlags, PathFlags},
 };
-
-use serde_json::Value;
-use tracing::debug;
 
 // Intermediate structs for JSON deserialization
 #[derive(Debug, Deserialize)]
@@ -150,9 +147,10 @@ fn parse_upload_request(body_content: &str) -> Result<(HelperContext, UploadConf
         },
         property: Property {
             name: property_name,
+            filename: payload.filename,
+            file_size: 0,
+            content_type: payload.content_type,
         },
-        filename: payload.filename,
-        content_type: payload.content_type,
         source_url: payload.url,
         source_headers,
     };
@@ -164,115 +162,334 @@ fn upload_file_internal(
     helper_context: HelperContext,
     config: UploadConfig,
 ) -> Result<UploadResult> {
+    eprintln!("Downloading source file: {}", config.source_url);
+
+    let file_data = match download_from_url(&config.source_url, &config.source_headers) {
+        Ok(data) => {
+            eprintln!("✅ Successfully downloaded {} bytes", data.len());
+            data
+        }
+        Err(e) => {
+            eprintln!(
+                "❌ Failed to download file from {}: {}",
+                config.source_url, e
+            );
+            return Err(e.context(format!(
+                "Failed to download file from {}",
+                config.source_url
+            )));
+        }
+    };
+
+    let file_size = file_data.len() as u64;
+
+    if let Err(e) = save_to_filesystem(&config.property.filename, &file_data) {
+        eprintln!("❌ Failed to save file to filesystem: {}", e);
+        return Err(e.context(format!(
+            "Failed to save file '{}' to filesystem",
+            config.property.filename
+        )));
+    }
+    eprintln!("✅ Saved file to filesystem");
+
     eprintln!(
-        "Fetching presigned URL for model: {}, property: {}",
+        "Fetching presigned POST for model: {}, property: {}",
         config.model.name, config.property.name
     );
 
-    // Fetch presigned URL from data-api
-    let presigned_post = fetch_presigned_post(&helper_context, &config)?;
+    let presigned_post = match fetch_presigned_post(&helper_context, &config) {
+        Ok(post) => {
+            eprintln!("✅ Successfully fetched presigned POST URL");
+            post
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to fetch presigned POST: {}", e);
+            return Err(e.context("Failed to fetch presigned POST URL"));
+        }
+    };
 
-    eprintln!("Downloading file from: {}", config.source_url);
+    // Read file from filesystem for upload
+    let file_data_from_disk = match read_from_filesystem(&config.property.filename) {
+        Ok(data) => {
+            eprintln!("✅ Read {} bytes from filesystem", data.len());
+            data
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to read file from filesystem: {}", e);
+            // Try to clean up
+            let _ = delete_from_filesystem(&config.property.filename);
+            return Err(e.context(format!(
+                "Failed to read file '{}' from filesystem",
+                config.property.filename
+            )));
+        }
+    };
 
-    // Download from source URL
-    let file_data = download_from_url(&config.source_url, &config.source_headers)?;
+    eprintln!(
+        "Uploading {} bytes to Wasabi via presigned POST",
+        file_data_from_disk.len()
+    );
 
-    #[cfg(feature = "fs")]
-    {
-        // Determine filename
-        let filename = &config.filename;
+    if let Err(e) = upload_to_presigned_post(
+        &presigned_post,
+        &file_data_from_disk,
+        &config.property.filename,
+        &config.property.content_type,
+    ) {
+        eprintln!("❌ Upload to Wasabi failed: {}", e);
 
-        eprintln!(
-            "Temporarily saving {} bytes as: {}",
-            file_data.len(),
-            filename
-        );
+        // Try to clean up the temporary file even if upload failed
+        if let Err(cleanup_err) = delete_from_filesystem(&config.property.filename) {
+            eprintln!(
+                "⚠️ Warning: Failed to cleanup temporary file after upload failure: {}",
+                cleanup_err
+            );
+        }
 
-        // Save to temporary filesystem
-        save_to_filesystem(filename, &file_data)?;
-
-        eprintln!("Uploading to presigned URL");
-
-        // Upload to presigned S3 URL
-        upload_to_presigned_url(&presigned_post.url, &file_data, &presigned_post.fields)?;
-
-        delete_from_filesystem(filename)?;
-
-        eprintln!("Upload complete, temporary file cleaned up");
+        return Err(e.context("Failed to upload file to Wasabi"));
     }
+    eprintln!("✅ Successfully uploaded to Wasabi");
 
-    #[cfg(not(feature = "fs"))]
-    {
-        eprintln!(
-            "Uploading {} bytes directly to presigned URL (in-memory)",
-            file_data.len()
-        );
-
-        // Upload directly from memory without filesystem operations
-        upload_to_presigned_url(&presigned_post.url, &file_data, &presigned_post.fields)?;
-
-        eprintln!("Upload complete (in-memory mode)");
+    if let Err(e) = delete_from_filesystem(&config.property.filename) {
+        eprintln!("⚠️ Warning: Failed to delete temporary file: {}", e);
+        // Don't fail the entire operation if cleanup fails
+        // The upload was successful, so we continue
+    } else {
+        eprintln!("✅ Cleaned up temporary file");
     }
 
     Ok(UploadResult {
-        reference: presigned_post.reference.to_string(),
-        file_size: file_data.len() as u64,
-        message: Some(format!("Successfully uploaded {} bytes", file_data.len())),
+        reference: presigned_post.reference.clone(),
+        file_size,
+        message: Some("Upload successful".into()),
     })
 }
 
-struct PresignedPost {
-    url: String,
-    fields: Vec<(String, String)>,
-    reference: String,
-}
+fn upload_to_presigned_post(
+    presigned_post: &PresignedUrl,
+    file_data: &[u8],
+    filename: &str,
+    content_type: &str,
+) -> Result<()> {
+    let boundary = format!("----wasmcloud{}", generate_boundary());
+    let body = build_multipart_body(
+        &boundary,
+        &presigned_post.fields,
+        file_data,
+        filename,
+        content_type,
+    )?;
 
-fn fetch_presigned_post(ctx: &HelperContext, cfg: &UploadConfig) -> Result<PresignedPost> {
-    let mutation = r#"
-      mutation GenerateUpload(
-        $model: String!,
-        $property: String!,
-        $contentType: String!,
-        $fileName: String!
-      ) {
-        generateFileUploadRequest(
-          modelName: $model
-          propertyName: $property
-          contentType: $contentType
-          fileName: $fileName
-        ) {
-          ... on PresignedPostRequest {
-            url
-            fields
-            reference
-          }
+    eprintln!("📤 Uploading multipart body: {} bytes", body.len());
+
+    let headers = Fields::new();
+    headers
+        .append(
+            "content-type",
+            format!("multipart/form-data; boundary={}", boundary).as_bytes(),
+        )
+        .map_err(|_| anyhow::anyhow!("failed to set content-type"))?;
+
+    let request = OutgoingRequest::new(headers);
+    request
+        .set_method(&Method::Post)
+        .map_err(|_| anyhow::anyhow!("failed to set method"))?;
+    request
+        .set_scheme(Some(&Scheme::Https))
+        .map_err(|_| anyhow::anyhow!("failed to set scheme"))?;
+
+    // Parse the presigned URL to extract authority and path
+    let parsed_url = parse_url(&presigned_post.url)?;
+
+    request
+        .set_authority(Some(&parsed_url.authority))
+        .map_err(|_| anyhow::anyhow!("failed to set authority"))?;
+    request
+        .set_path_with_query(Some(&parsed_url.path_and_query))
+        .map_err(|_| anyhow::anyhow!("failed to set path"))?;
+
+    let request_body = request
+        .body()
+        .map_err(|_| anyhow::anyhow!("failed to get request body"))?;
+
+    let future = outgoing_handler::handle(request, None)
+        .map_err(|e| anyhow::anyhow!("handle failed: {:?}", e))?;
+
+    let stream = request_body
+        .write()
+        .map_err(|_| anyhow::anyhow!("failed to open body stream"))?;
+
+    // Write in chunks with progress reporting every 10%
+    let mut offset = 0;
+    let total_size = body.len();
+    let mut last_reported_progress = 0;
+
+    while offset < total_size {
+        let chunk_size = std::cmp::min(4096, total_size - offset);
+        let chunk = &body[offset..offset + chunk_size];
+
+        // Use non-blocking write with check
+        loop {
+            match stream.check_write() {
+                Ok(0) => {
+                    stream.subscribe().block();
+                    continue;
+                }
+                Ok(available) => {
+                    let to_write = std::cmp::min(available as usize, chunk.len());
+                    stream
+                        .write(&chunk[..to_write])
+                        .map_err(|e| anyhow::anyhow!("write failed: {:?}", e))?;
+                    break;
+                }
+                Err(e) => return Err(anyhow::anyhow!("check_write failed: {:?}", e)),
+            }
         }
-      }
-    "#;
 
-    let vars = serde_json::json!({
-        "model": cfg.model.name,
-        "property": cfg.property.name,
-        "contentType": cfg.content_type,
-        "fileName": cfg.filename,
-    });
+        offset += chunk_size;
 
-    let resp = data_api::request(ctx, mutation, &vars.to_string())
-        .map_err(|e| anyhow::anyhow!("data-api request failed: {}", e))?;
+        // Report progress every 10%
+        let progress = (offset * 100) / total_size;
+        if progress >= last_reported_progress + 10 {
+            eprintln!(
+                "  📊 Upload progress: {}% ({}/{} bytes)",
+                progress, offset, total_size
+            );
+            last_reported_progress = progress;
+        }
+    }
 
-    let json: Value = serde_json::from_str(&resp)?;
-    let post = &json["data"]["generateFileUploadRequest"];
+    eprintln!("✅ All data written, flushing...");
+    stream
+        .flush()
+        .map_err(|e| anyhow::anyhow!("flush failed: {:?}", e))?;
+    stream.subscribe().block();
 
-    Ok(PresignedPost {
-        url: post["url"].as_str().unwrap().to_string(),
-        reference: post["reference"].as_str().unwrap().to_string(),
-        fields: post["fields"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
-            .collect(),
-    })
+    drop(stream);
+
+    OutgoingBody::finish(request_body, None)
+        .map_err(|_| anyhow::anyhow!("failed to finish body"))?;
+
+    eprintln!("⏳ Waiting for response...");
+    future.subscribe().block();
+
+    let response = future
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("no response"))?
+        .map_err(|e| anyhow::anyhow!("response err: {:?}", e))??;
+
+    let status = response.status();
+    eprintln!("📊 Status: {}", status);
+
+    if status >= 300 {
+        let err = read_response_body(&response).unwrap_or_default();
+        eprintln!("❌ Error body: {}", err);
+        return Err(anyhow::anyhow!(
+            "upload failed with status {}: {}",
+            status,
+            err
+        ));
+    }
+
+    eprintln!("✅ Presigned POST upload succeeded");
+    Ok(())
+}
+
+fn build_multipart_body(
+    boundary: &str,
+    fields: &[Field],
+    file_data: &[u8],
+    filename: &str,
+    content_type: &str,
+) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+
+    // Add all form fields first
+    for field in fields {
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{}\"\r\n\r\n",
+                field.key
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(field.value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+
+    // Add file as the last field - S3 expects this pattern
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            filename
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
+    body.extend_from_slice(file_data);
+    body.extend_from_slice(b"\r\n");
+
+    // Final boundary
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    Ok(body)
+}
+
+fn read_from_filesystem(filename: &str) -> Result<Vec<u8>> {
+    let preopens = get_directories();
+    if preopens.is_empty() {
+        return Err(anyhow::anyhow!("No preopened directories available"));
+    }
+
+    let (dir, _) = &preopens[0];
+
+    // Open file with READ permission
+    let file = dir
+        .open_at(
+            PathFlags::empty(),
+            filename,
+            OpenFlags::empty(),
+            DescriptorFlags::READ,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to open file for reading: {e:?}"))?;
+
+    // Get file size
+    let stat = file
+        .stat()
+        .map_err(|e| anyhow::anyhow!("Failed to get file stats: {e:?}"))?;
+
+    let file_size = stat.size;
+    eprintln!("📖 Reading file of size: {} bytes", file_size);
+
+    // Read from position 0
+    let stream = file
+        .read_via_stream(0)
+        .map_err(|e| anyhow::anyhow!("Failed to get read stream: {e:?}"))?;
+
+    let mut data = Vec::with_capacity(file_size as usize);
+    loop {
+        match stream.blocking_read(8192) {
+            Ok(chunk) if chunk.is_empty() => break,
+            Ok(chunk) => data.extend_from_slice(&chunk),
+            Err(StreamError::Closed) => break,
+            Err(e) => return Err(anyhow::anyhow!("Stream error while reading file: {e:?}")),
+        }
+    }
+
+    drop(stream);
+    drop(file);
+
+    eprintln!("📖 Read {} bytes from {}", data.len(), filename);
+
+    Ok(data)
+}
+
+fn fetch_presigned_post(_ctx: &HelperContext, cfg: &UploadConfig) -> Result<PresignedUrl> {
+    let presigned_obj = data_api_utilities::fetch_presigned(&cfg.model.name, &cfg.property)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch presigned URL: {}", e))?;
+    Ok(presigned_obj)
 }
 
 fn download_from_url(url: &str, headers: &Option<Vec<(String, String)>>) -> Result<Vec<u8>> {
@@ -358,138 +575,14 @@ fn download_from_url(url: &str, headers: &Option<Vec<(String, String)>>) -> Resu
     Ok(data)
 }
 
-fn upload_to_presigned_url(
-    presigned_url: &str,
-    file_data: &[u8],
-    fields: &Vec<(String, String)>,
-) -> Result<()> {
-    let parsed_url = parse_url(presigned_url)?;
-
-    // Generate a boundary for multipart/form-data
-    let boundary = format!("----WebKitFormBoundary{}", generate_boundary());
-
-    // Build the multipart body
-    let body = build_multipart_body(&boundary, fields, file_data)?;
-
-    debug!("Built multipart body with {} bytes", body.len());
-
-    let headers = Fields::new();
-
-    // Set Content-Type header with boundary
-    let content_type = format!("multipart/form-data; boundary={}", boundary);
-    headers
-        .append("content-type", content_type.as_bytes())
-        .map_err(|_| anyhow::anyhow!("Failed to set content-type header"))?;
-
-    // Set Content-Length header
-    let content_length = body.len().to_string();
-    headers
-        .append("content-length", content_length.as_bytes())
-        .map_err(|_| anyhow::anyhow!("Failed to set content-length header"))?;
-
-    let outgoing_request = OutgoingRequest::new(headers);
-
-    // Use POST for presigned POST (not PUT)
-    outgoing_request
-        .set_method(&Method::Post)
-        .map_err(|_| anyhow::anyhow!("Failed to set method"))?;
-
-    outgoing_request
-        .set_scheme(Some(&parsed_url.scheme))
-        .map_err(|_| anyhow::anyhow!("Failed to set scheme"))?;
-
-    outgoing_request
-        .set_authority(Some(&parsed_url.authority))
-        .map_err(|_| anyhow::anyhow!("Failed to set authority"))?;
-
-    outgoing_request
-        .set_path_with_query(Some(&parsed_url.path_and_query))
-        .map_err(|_| anyhow::anyhow!("Failed to set path"))?;
-
-    // Write the request body
-    let request_body = outgoing_request
-        .body()
-        .map_err(|_| anyhow::anyhow!("Failed to get request body"))?;
-
-    let output_stream = request_body
-        .write()
-        .map_err(|_| anyhow::anyhow!("Failed to get output stream"))?;
-
-    write_stream_in_chunks(&output_stream, &body)?;
-
-    drop(output_stream);
-    OutgoingBody::finish(request_body, None)
-        .map_err(|_| anyhow::anyhow!("Failed to finish request body"))?;
-
-    let future_response = outgoing_handler::handle(outgoing_request, None)
-        .map_err(|e| anyhow::anyhow!("Failed to send upload request: {e:?}"))?;
-
-    let incoming_response = match future_response.get() {
-        Some(result) => result.map_err(|e| anyhow::anyhow!("Upload request failed: {e:?}"))?,
-        None => {
-            future_response.subscribe().block();
-            future_response
-                .get()
-                .ok_or_else(|| anyhow::anyhow!("Failed to get response"))?
-                .map_err(|e| anyhow::anyhow!("Upload request failed: {e:?}"))?
-        }
-    }
-    .map_err(|e| anyhow::anyhow!("Upload response error: {e:?}"))?;
-
-    let status = incoming_response.status();
-    if status < 200 || status >= 300 {
-        // Try to read error response body for debugging
-        let error_body = read_response_body(&incoming_response).unwrap_or_default();
-        eprintln!("❌ Upload failed response: {}", error_body);
-        return Err(anyhow::anyhow!(
-            "Upload failed with status code: {}",
-            status
-        ));
-    }
-
-    eprintln!("✅ Upload successful with status: {}", status);
-
-    Ok(())
-}
-
-fn build_multipart_body(
-    boundary: &str,
-    fields: &Vec<(String, String)>,
-    file_data: &[u8],
-) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-
-    // Add all form fields first (these come from the presigned POST response)
-    for (key, value) in fields {
-        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-        body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", key).as_bytes(),
-        );
-        body.extend_from_slice(value.as_bytes());
-        body.extend_from_slice(b"\r\n");
-    }
-
-    // Add the file data last (S3 requires 'file' to be the last field)
-    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"file\"\r\n");
-    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
-    body.extend_from_slice(file_data);
-    body.extend_from_slice(b"\r\n");
-
-    // Final boundary
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-
-    Ok(body)
-}
-
 fn generate_boundary() -> String {
-    // Generate a simple random boundary
-    // In production, you might want to use a proper random generator
     use std::time::SystemTime;
+
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+
     format!("{:x}", nanos)
 }
 
@@ -519,7 +612,6 @@ fn read_response_body(response: &bindings::wasi::http::types::IncomingResponse) 
     String::from_utf8(data).context("Invalid UTF-8 in response body")
 }
 
-#[cfg(feature = "fs")]
 fn save_to_filesystem(filename: &str, data: &[u8]) -> Result<()> {
     let preopens = get_directories();
     if preopens.is_empty() {
@@ -548,12 +640,11 @@ fn save_to_filesystem(filename: &str, data: &[u8]) -> Result<()> {
     drop(stream);
     drop(file);
 
-    eprintln!("Saved {} bytes to {}", data.len(), filename);
+    eprintln!("💾 Saved {} bytes to {}", data.len(), filename);
 
     Ok(())
 }
 
-#[cfg(feature = "fs")]
 fn delete_from_filesystem(filename: &str) -> Result<()> {
     let preopens = get_directories();
     if preopens.is_empty() {
@@ -647,3 +738,125 @@ fn send_response(response_out: ResponseOutparam, status: u16, body: &[u8]) {
 }
 
 bindings::export!(Component with_types_in bindings);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_generate_boundary() {
+        let boundary = generate_boundary();
+        assert!(!boundary.is_empty());
+        assert!(boundary.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_generate_boundary_unique() {
+        let boundary1 = generate_boundary();
+        let boundary2 = generate_boundary();
+        // Boundaries should be different (very high probability)
+        // We can't guarantee this 100% but nanosecond precision makes collision unlikely
+        assert_ne!(boundary1, boundary2);
+    }
+
+    #[test]
+    fn test_build_multipart_body_structure() {
+        let boundary = "testboundary123";
+        let fields = vec![
+            Field {
+                key: "key1".to_string(),
+                value: "value1".to_string(),
+            },
+            Field {
+                key: "key2".to_string(),
+                value: "value2".to_string(),
+            },
+        ];
+        let file_data = b"test file content";
+        let filename = "test.pdf";
+        let content_type = "application/pdf";
+
+        let result =
+            build_multipart_body(boundary, &fields, file_data, filename, content_type).unwrap();
+        let body_str = String::from_utf8_lossy(&result);
+
+        // Check that all fields are present
+        assert!(body_str.contains("--testboundary123"));
+        assert!(body_str.contains("name=\"key1\""));
+        assert!(body_str.contains("value1"));
+        assert!(body_str.contains("name=\"key2\""));
+        assert!(body_str.contains("value2"));
+
+        // Check file field with actual filename and content type
+        assert!(body_str.contains("name=\"file\""));
+        assert!(body_str.contains("filename=\"test.pdf\""));
+        assert!(body_str.contains("Content-Type: application/pdf"));
+        assert!(body_str.contains("test file content"));
+
+        // Check final boundary
+        assert!(body_str.contains("--testboundary123--"));
+    }
+
+    #[test]
+    fn test_build_multipart_body_empty_fields() {
+        let boundary = "boundary";
+        let fields = vec![];
+        let file_data = b"content";
+        let filename = "file.txt";
+        let content_type = "text/plain";
+
+        let result =
+            build_multipart_body(boundary, &fields, file_data, filename, content_type).unwrap();
+        let body_str = String::from_utf8_lossy(&result);
+
+        // Should still have file field and boundaries
+        assert!(body_str.contains("--boundary"));
+        assert!(body_str.contains("name=\"file\""));
+        assert!(body_str.contains("filename=\"file.txt\""));
+        assert!(body_str.contains("Content-Type: text/plain"));
+        assert!(body_str.contains("content"));
+        assert!(body_str.contains("--boundary--"));
+    }
+
+    #[test]
+    fn test_build_multipart_body_empty_file() {
+        let boundary = "boundary";
+        let fields = vec![Field {
+            key: "test".to_string(),
+            value: "value".to_string(),
+        }];
+        let file_data = b"";
+        let filename = "empty.bin";
+        let content_type = "application/octet-stream";
+
+        let result =
+            build_multipart_body(boundary, &fields, file_data, filename, content_type).unwrap();
+        let body_str = String::from_utf8_lossy(&result);
+
+        // Should handle empty file
+        assert!(body_str.contains("name=\"test\""));
+        assert!(body_str.contains("name=\"file\""));
+        assert!(body_str.contains("filename=\"empty.bin\""));
+        assert!(body_str.contains("Content-Type: application/octet-stream"));
+    }
+
+    #[test]
+    fn test_build_multipart_body_special_characters() {
+        let boundary = "boundary";
+        let fields = vec![Field {
+            key: "Content-Type".to_string(),
+            value: "application/pdf".to_string(),
+        }];
+        let file_data = b"\xFF\xFE binary data \x00";
+        let filename = "special-file.bin";
+        let content_type = "application/octet-stream";
+
+        let result = build_multipart_body(boundary, &fields, file_data, filename, content_type);
+        assert!(result.is_ok());
+
+        let body = result.unwrap();
+        // Binary data should be preserved
+        assert!(body.contains(&0xFF));
+        assert!(body.contains(&0xFE));
+        assert!(body.contains(&0x00));
+    }
+}
