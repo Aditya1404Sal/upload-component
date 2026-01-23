@@ -1,5 +1,5 @@
 [package]
-name = "file-upload"
+name = "store-file"
 edition = "2021"
 version = "0.1.0"
 
