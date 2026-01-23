@@ -8,7 +8,7 @@ mod bindings {
 
 use bindings::{
     bettyblocks::data_api::data_api::HelperContext,
-    bettyblocks::data_api::data_api_utilities::{self, Field, PresignedUrl, Property},
+    bettyblocks::data_api::data_api_utilities::{self, PolicyField, PresignedUploadUrl, Property},
     exports::bettyblocks::file::uploader::{
         Guest as UploaderGuest, Model, UploadConfig, UploadResult,
     },
@@ -159,7 +159,7 @@ fn parse_upload_request(body_content: &str) -> Result<(HelperContext, UploadConf
 }
 
 fn upload_file_internal(
-    helper_context: HelperContext,
+    _helper_context: HelperContext,
     config: UploadConfig,
 ) -> Result<UploadResult> {
     eprintln!("Downloading source file: {}", config.source_url);
@@ -197,7 +197,7 @@ fn upload_file_internal(
         config.model.name, config.property.name
     );
 
-    let presigned_post = match fetch_presigned_post(&helper_context, &config) {
+    let presigned_upload_url = match fetch_presigned_upload_url(&config) {
         Ok(post) => {
             eprintln!("✅ Successfully fetched presigned POST URL");
             post
@@ -231,7 +231,7 @@ fn upload_file_internal(
     );
 
     if let Err(e) = upload_to_presigned_post(
-        &presigned_post,
+        &presigned_upload_url,
         &file_data_from_disk,
         &config.property.filename,
         &config.property.content_type,
@@ -259,14 +259,14 @@ fn upload_file_internal(
     }
 
     Ok(UploadResult {
-        reference: presigned_post.reference.clone(),
+        reference: presigned_upload_url.reference.clone(),
         file_size,
         message: Some("Upload successful".into()),
     })
 }
 
 fn upload_to_presigned_post(
-    presigned_post: &PresignedUrl,
+    presigned_post: &PresignedUploadUrl,
     file_data: &[u8],
     filename: &str,
     content_type: &str,
@@ -397,7 +397,7 @@ fn upload_to_presigned_post(
 
 fn build_multipart_body(
     boundary: &str,
-    fields: &[Field],
+    fields: &[PolicyField],
     file_data: &[u8],
     filename: &str,
     content_type: &str,
@@ -486,9 +486,12 @@ fn read_from_filesystem(filename: &str) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-fn fetch_presigned_post(_ctx: &HelperContext, cfg: &UploadConfig) -> Result<PresignedUrl> {
-    let presigned_obj = data_api_utilities::fetch_presigned(&cfg.model.name, &cfg.property)
-        .map_err(|e| anyhow::anyhow!("Failed to fetch presigned URL: {}", e))?;
+fn fetch_presigned_upload_url(
+    cfg: &UploadConfig,
+) -> Result<PresignedUploadUrl> {
+    let presigned_obj =
+        data_api_utilities::fetch_presigned_upload_url(&cfg.model.name, &cfg.property)
+            .map_err(|e| anyhow::anyhow!("Failed to fetch presigned URL: {}", e))?;
     Ok(presigned_obj)
 }
 
@@ -762,11 +765,11 @@ mod tests {
     fn test_build_multipart_body_structure() {
         let boundary = "testboundary123";
         let fields = vec![
-            Field {
+            PolicyField {
                 key: "key1".to_string(),
                 value: "value1".to_string(),
             },
-            Field {
+            PolicyField {
                 key: "key2".to_string(),
                 value: "value2".to_string(),
             },
@@ -820,7 +823,7 @@ mod tests {
     #[test]
     fn test_build_multipart_body_empty_file() {
         let boundary = "boundary";
-        let fields = vec![Field {
+        let fields = vec![PolicyField {
             key: "test".to_string(),
             value: "value".to_string(),
         }];
@@ -842,7 +845,7 @@ mod tests {
     #[test]
     fn test_build_multipart_body_special_characters() {
         let boundary = "boundary";
-        let fields = vec![Field {
+        let fields = vec![PolicyField {
             key: "Content-Type".to_string(),
             value: "application/pdf".to_string(),
         }];

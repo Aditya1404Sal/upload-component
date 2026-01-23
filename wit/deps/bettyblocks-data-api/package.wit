@@ -18,12 +18,12 @@ interface data-api {
 
 interface data-api-utilities {
 
-    record field {
+    record policy-field {
         key: string,
         value: string,
     }
 
-    type policy-fields = list<field>;
+    type policy-fields = list<policy-field>;
 
     record property {
         name: string,
@@ -32,11 +32,11 @@ interface data-api-utilities {
         file-size: u64,
     }
 
-    record presigned-url {
+    record presigned-upload-url {
         url: string,
         fields: policy-fields,
         reference: string,
     }
 
-    fetch-presigned: func(model: string, property: property) -> result<presigned-url,string>;
+    fetch-presigned-upload-url: func(model: string, property: property) -> result<presigned-upload-url,string>;
 }
