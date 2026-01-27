@@ -1,7 +1,7 @@
 package bettyblocks:data-api;
 
 interface data-api {
-    record helper-context {
+    record data-api-context {
         application-id: string,      // Identifies the Betty Blocks application
         action-id: string,           // Identifies the specific action being executed
         log-id: string,              // For tracking/logging purposes
@@ -10,7 +10,7 @@ interface data-api {
     }
 
     request: func(
-        helper-context: helper-context, 
+        data-api-context: data-api-context, 
         query: string,              // GraphQL query/mutation
         variables: string           // JSON string of GraphQL variables
     ) -> result<string, string>;    // Returns JSON response or error
@@ -25,18 +25,19 @@ interface data-api-utilities {
 
     type policy-fields = list<policy-field>;
 
-    record property {
+    record model {
         name: string,
-        content-type: string,
-        filename: string,
-        file-size: u64,
     }
 
-    record presigned-upload-url {
+    record property {
+        name: string,
+    }
+
+    record presigned-post {
         url: string,
         fields: policy-fields,
         reference: string,
     }
-
-    fetch-presigned-upload-url: func(model: string, property: property) -> result<presigned-upload-url,string>;
+    
+    fetch-presigned-post: func(model: model, property: property, content-type: string, filename: string) -> result<presigned-post,string>;
 }

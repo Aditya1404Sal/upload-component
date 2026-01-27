@@ -12,15 +12,17 @@ pub mod bindings {
 }
 
 use bindings::{
-    bettyblocks::data_api::{data_api::HelperContext, data_api_utilities::Property},
-    exports::bettyblocks::file::uploader::{
-        Guest as UploaderGuest, Model, UploadConfig, UploadResult,
-    },
+    bettyblocks::data_api::{data_api::DataApiContext, data_api_utilities::Property},
+    exports::bettyblocks::file::uploader::{Guest as UploaderGuest, Model, UploadResult},
     exports::wasi::http::incoming_handler::Guest,
     wasi::{
         http::types::{Fields, IncomingRequest, OutgoingBody, OutgoingResponse, ResponseOutparam},
         io::streams::StreamError,
     },
+};
+
+use crate::{
+    bindings::exports::bettyblocks::file::uploader::DownloadHeaders, upload::upload_file_internal,
 };
 
 // Intermediate structs for JSON deserialization
@@ -37,24 +39,14 @@ struct UploadRequestPayload {
     encrypted_configurations: Option<Vec<String>>,
     jwt: Option<String>,
     model: ModelName,
-    property: PropertyField,
+    property: PropertyName,
     url: String,
-    filename: String,
-    #[serde(rename = "content-type")]
-    content_type: String,
     headers: Option<Vec<HeaderPair>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ModelName {
     name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum PropertyField {
-    Single(PropertyName),
-    Array(Vec<PropertyName>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,8 +79,17 @@ impl Guest for Component {
 }
 
 impl UploaderGuest for Component {
-    fn upload(helper_context: HelperContext, config: UploadConfig) -> Result<UploadResult, String> {
-        upload::upload_file_internal(helper_context, config).map_err(|e| e.to_string())
+    fn upload(
+        _data_api_context: DataApiContext,
+        model: Model,
+        property: Property,
+        download_url: String,
+        download_headers: DownloadHeaders,
+    ) -> Result<UploadResult, String> {
+        // JWT validation can go here, before handoff to internal
+        // will use the data-api-context for the Auth/AuthZ for validation it
+        upload_file_internal(model, property, download_url, download_headers)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -96,9 +97,26 @@ fn handle_request(request: IncomingRequest) -> Result<String> {
     eprintln!("📤 Processing incoming upload request");
 
     let body_content = read_request_body(request)?;
-    let (helper_context, config) = parse_upload_request(&body_content)?;
+    let payload = parse_upload_request(&body_content)?;
 
-    let result = upload::upload_file_internal(helper_context, config)?;
+    let _data_api_context = DataApiContext {
+        application_id: payload.application_id,
+        action_id: payload.action_id,
+        log_id: payload.log_id,
+        encrypted_configurations: payload.encrypted_configurations,
+        jwt: payload.jwt,
+    };
+    let model = Model {
+        name: payload.model.name,
+    };
+    let property = Property {
+        name: payload.property.name,
+    };
+
+    let headers: Option<Vec<(String, String)>> = payload
+        .headers
+        .map(|vec| vec.into_iter().map(|h| (h.key, h.value)).collect());
+    let result = upload::upload_file_internal(model, property, payload.url, headers)?;
 
     Ok(format!(
         "File uploaded successfully! Reference: {}, Size: {} bytes",
@@ -106,49 +124,10 @@ fn handle_request(request: IncomingRequest) -> Result<String> {
     ))
 }
 
-fn parse_upload_request(body_content: &str) -> Result<(HelperContext, UploadConfig)> {
+fn parse_upload_request(body_content: &str) -> Result<UploadRequestPayload> {
     let payload: UploadRequestPayload =
         serde_json::from_str(body_content).context("Request body must be valid JSON")?;
-
-    let helper_context = HelperContext {
-        application_id: payload.application_id,
-        action_id: payload.action_id,
-        log_id: payload.log_id,
-        encrypted_configurations: payload.encrypted_configurations,
-        jwt: payload.jwt,
-    };
-
-    let property_name = match payload.property {
-        PropertyField::Single(prop) => prop.name,
-        PropertyField::Array(props) => props
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("Property array is empty"))?
-            .name
-            .clone(),
-    };
-
-    let source_headers = payload.headers.map(|headers| {
-        headers
-            .into_iter()
-            .map(|h| (h.key, h.value))
-            .collect::<Vec<_>>()
-    });
-
-    let config = UploadConfig {
-        model: Model {
-            name: payload.model.name,
-        },
-        property: Property {
-            name: property_name,
-            filename: payload.filename,
-            file_size: 0,
-            content_type: payload.content_type,
-        },
-        source_url: payload.url,
-        source_headers,
-    };
-
-    Ok((helper_context, config))
+    Ok(payload)
 }
 
 fn read_request_body(request: IncomingRequest) -> Result<String> {

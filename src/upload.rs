@@ -1,70 +1,105 @@
 use anyhow::{Context, Result};
 
 use crate::bindings::{
-    bettyblocks::data_api::data_api::HelperContext,
-    bettyblocks::data_api::data_api_utilities::{self, PolicyField, PresignedUploadUrl},
-    exports::bettyblocks::file::uploader::{UploadConfig, UploadResult},
+    bettyblocks::data_api::data_api_utilities::{
+        self, Model, PolicyField, PresignedPost, Property,
+    },
+    exports::bettyblocks::file::uploader::{DownloadHeaders, UploadResult},
     wasi::{
-        http::outgoing_handler,
-        http::types::{Fields, Method, OutgoingBody, OutgoingRequest, Scheme},
+        http::{
+            outgoing_handler,
+            types::{Fields, Method, OutgoingBody, OutgoingRequest, Scheme},
+        },
         io::streams::StreamError,
     },
 };
 
-pub fn upload_file_internal(
-    _helper_context: HelperContext,
-    config: UploadConfig,
-) -> Result<UploadResult> {
-    eprintln!("Downloading source file: {}", config.source_url);
+/// Extracts filename and content type from a download URL
+fn extract_file_info_from_url(url: &str) -> Result<(String, String)> {
+    // Parse the URL to get the path component
+    let url_path = url
+        .split('?')
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Invalid URL format"))?;
 
-    let file_data =
-        match crate::download::download_from_url(&config.source_url, &config.source_headers) {
-            Ok(data) => {
-                eprintln!("✅ Successfully downloaded {} bytes", data.len());
-                data
-            }
-            Err(e) => {
-                eprintln!(
-                    "❌ Failed to download file from {}: {}",
-                    config.source_url, e
-                );
-                return Err(e.context(format!(
-                    "Failed to download file from {}",
-                    config.source_url
-                )));
-            }
-        };
+    // Extract filename from the path
+    let filename = url_path
+        .split('/')
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("Could not extract filename from URL"))?
+        .to_string();
+
+    // If filename is empty, use a default
+    let filename = if filename.is_empty() {
+        "downloaded_file".to_string()
+    } else {
+        // URL decode the filename
+        urlencoding::decode(&filename)
+            .unwrap_or_else(|_| std::borrow::Cow::Borrowed(&filename))
+            .to_string()
+    };
+
+    // Guess content type from filename extension using mime_guess
+    let content_type = mime_guess::from_path(&filename)
+        .first_or_octet_stream()
+        .to_string();
+
+    Ok((filename, content_type))
+}
+
+pub fn upload_file_internal(
+    model: Model,
+    property: Property,
+    download_url: String,
+    download_headers: DownloadHeaders,
+) -> Result<UploadResult> {
+    eprintln!("Downloading source file: {}", download_url);
+
+    let file_data = match crate::download::download_from_url(&download_url, &download_headers) {
+        Ok(data) => {
+            eprintln!("✅ Successfully downloaded {} bytes", data.len());
+            data
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to download file from {}: {}", download_url, e);
+            return Err(e.context(format!("Failed to download file from {}", download_url)));
+        }
+    };
+
+    // Extract filename and content type from the download URL
+    let (file_name, content_type) = extract_file_info_from_url(&download_url)
+        .context("Failed to extract file info from URL")?;
+
+    eprintln!("📄 Extracted filename: {}", file_name);
+    eprintln!("📋 Detected content type: {}", content_type);
 
     let file_size = file_data.len() as u64;
 
-    if let Err(e) = crate::download::save_to_filesystem(&config.property.filename, &file_data) {
+    if let Err(e) = crate::download::save_to_filesystem(&file_name, &file_data) {
         eprintln!("❌ Failed to save file to filesystem: {}", e);
-        return Err(e.context(format!(
-            "Failed to save file '{}' to filesystem",
-            config.property.filename
-        )));
+        return Err(e.context(format!("Failed to save file '{}' to filesystem", file_name)));
     }
     eprintln!("✅ Saved file to filesystem");
 
     eprintln!(
         "Fetching presigned POST for model: {}, property: {}",
-        config.model.name, config.property.name
+        model.name, property.name
     );
 
-    let presigned_upload_url = match fetch_presigned_upload_url(&config) {
-        Ok(post) => {
-            eprintln!("✅ Successfully fetched presigned POST URL");
-            post
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to fetch presigned POST: {}", e);
-            return Err(e.context("Failed to fetch presigned POST URL"));
-        }
-    };
+    let presigned_upload_url =
+        match fetch_presigned_upload_url(&model, &property, &content_type, &file_name) {
+            Ok(post) => {
+                eprintln!("✅ Successfully fetched presigned POST URL");
+                post
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to fetch presigned POST: {}", e);
+                return Err(e.context("Failed to fetch presigned POST URL"));
+            }
+        };
 
     // Read file from filesystem for upload
-    let file_data_from_disk = match crate::download::read_from_filesystem(&config.property.filename)
-    {
+    let file_data_from_disk = match crate::download::read_from_filesystem(&file_name) {
         Ok(data) => {
             eprintln!("✅ Read {} bytes from filesystem", data.len());
             data
@@ -72,10 +107,10 @@ pub fn upload_file_internal(
         Err(e) => {
             eprintln!("❌ Failed to read file from filesystem: {}", e);
             // Try to clean up
-            let _ = crate::download::delete_from_filesystem(&config.property.filename);
+            let _ = crate::download::delete_from_filesystem(&file_name);
             return Err(e.context(format!(
                 "Failed to read file '{}' from filesystem",
-                config.property.filename
+                file_name
             )));
         }
     };
@@ -88,14 +123,13 @@ pub fn upload_file_internal(
     if let Err(e) = upload_to_presigned_post(
         &presigned_upload_url,
         &file_data_from_disk,
-        &config.property.filename,
-        &config.property.content_type,
+        &file_name,
+        &content_type,
     ) {
         eprintln!("❌ Upload to Wasabi failed: {}", e);
 
         // Try to clean up the temporary file even if upload failed
-        if let Err(cleanup_err) = crate::download::delete_from_filesystem(&config.property.filename)
-        {
+        if let Err(cleanup_err) = crate::download::delete_from_filesystem(&file_name) {
             eprintln!(
                 "⚠️ Warning: Failed to cleanup temporary file after upload failure: {}",
                 cleanup_err
@@ -106,7 +140,7 @@ pub fn upload_file_internal(
     }
     eprintln!("✅ Successfully uploaded to Wasabi");
 
-    if let Err(e) = crate::download::delete_from_filesystem(&config.property.filename) {
+    if let Err(e) = crate::download::delete_from_filesystem(&file_name) {
         eprintln!("⚠️ Warning: Failed to delete temporary file: {}", e);
         // Don't fail the entire operation if cleanup fails
         // The upload was successful, so we continue
@@ -122,7 +156,7 @@ pub fn upload_file_internal(
 }
 
 fn upload_to_presigned_post(
-    presigned_post: &PresignedUploadUrl,
+    presigned_post: &PresignedPost,
     file_data: &[u8],
     filename: &str,
     content_type: &str,
@@ -293,9 +327,14 @@ pub fn build_multipart_body(
     Ok(body)
 }
 
-fn fetch_presigned_upload_url(cfg: &UploadConfig) -> Result<PresignedUploadUrl> {
+fn fetch_presigned_upload_url(
+    model: &Model,
+    property: &Property,
+    content_type: &str,
+    file_name: &str,
+) -> Result<PresignedPost> {
     let presigned_obj =
-        data_api_utilities::fetch_presigned_upload_url(&cfg.model.name, &cfg.property)
+        data_api_utilities::fetch_presigned_post(&model, property, content_type, file_name)
             .map_err(|e| anyhow::anyhow!("Failed to fetch presigned URL: {}", e))?;
     Ok(presigned_obj)
 }
