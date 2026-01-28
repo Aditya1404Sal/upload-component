@@ -1,4 +1,6 @@
 use anyhow::Result;
+use std::thread;
+use std::time::Duration;
 
 use crate::bindings::wasi::{
     filesystem::{
@@ -7,6 +9,9 @@ use crate::bindings::wasi::{
     },
     io::streams::StreamError,
 };
+
+const MAX_READ_RETRIES: u32 = 3;
+const RETRY_DELAY_MS: u64 = 100;
 
 pub fn read_from_filesystem(filename: &str) -> Result<Vec<u8>> {
     let preopens = get_directories();
@@ -114,4 +119,34 @@ pub fn write_stream_in_chunks(
             .map_err(|e| anyhow::anyhow!("Stream write error: {e:?}"))?;
     }
     Ok(())
+}
+
+pub fn read_with_retry(file_name: &str) -> Result<Vec<u8>> {
+    let mut last_error = None;
+
+    for attempt in 1..=MAX_READ_RETRIES {
+        match crate::fs::read_from_filesystem(file_name) {
+            Ok(data) => {
+                if attempt > 1 {
+                    eprintln!("Successfully read file on attempt {}", attempt);
+                }
+                return Ok(data);
+            }
+            Err(e) => {
+                eprintln!("Read attempt {} failed: {}", attempt, e);
+                last_error = Some(e);
+
+                if attempt < MAX_READ_RETRIES {
+                    thread::sleep(Duration::from_millis(RETRY_DELAY_MS * attempt as u64));
+                }
+            }
+        }
+    }
+
+    // if all retry are exhausted then cleanup and fail
+    let _ = crate::fs::delete_from_filesystem(file_name);
+    Err(last_error.unwrap().context(format!(
+        "Failed to read file '{}' after {} attempts",
+        file_name, MAX_READ_RETRIES
+    )))
 }

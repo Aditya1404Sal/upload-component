@@ -20,6 +20,7 @@ pub fn upload_file_internal(
     download_url: String,
     download_headers: DownloadHeaders,
 ) -> Result<UploadResult> {
+    // Download
     let (file_data, file_name, content_type) =
         match crate::download::download_from_url(&download_url, &download_headers) {
             Ok(data) => data,
@@ -29,7 +30,7 @@ pub fn upload_file_internal(
         };
 
     let file_size = file_data.len() as u64;
-
+    // Save to fs
     if let Err(e) = crate::fs::save_to_filesystem(&file_name, &file_data) {
         eprintln!("Failed to save file to filesystem: {}", e);
         return Err(e.context(format!("Failed to save file '{}' to filesystem", file_name)));
@@ -39,29 +40,19 @@ pub fn upload_file_internal(
         "Fetching presigned POST for model: {}, property: {}",
         model.name, property.name
     );
-
+    // fetch presigned upload url
     let presigned_upload_url =
         data_api_utilities::fetch_presigned_post(&model, &property, &content_type, &file_name)
             .map_err(|e| anyhow::anyhow!("Failed to fetch presigned URL: {}", e))?;
 
-    // Read file from filesystem for upload
-    let file_data_from_disk = match crate::fs::read_from_filesystem(&file_name) {
-        Ok(data) => data,
-        Err(e) => {
-            // Failed to read, cleanup corrupted file
-            let _ = crate::fs::delete_from_filesystem(&file_name);
-            return Err(e.context(format!(
-                "Failed to read file '{}' from filesystem",
-                file_name
-            )));
-        }
-    };
+    // Read file from fs : with retry because what's the point of saving it otherwise :)
+    let file_data_from_disk = crate::fs::read_with_retry(&file_name)?;
 
     eprintln!(
         "Uploading {} bytes to Wasabi via presigned POST",
         file_data_from_disk.len()
     );
-
+    // upload to s3
     if let Err(e) = upload_to_presigned_post(
         &presigned_upload_url,
         &file_data_from_disk,
@@ -79,11 +70,9 @@ pub fn upload_file_internal(
         return Err(e.context("Failed to upload file to S3"));
     }
     eprintln!("Successfully uploaded to S3");
-
+    // cleanup
     if let Err(e) = crate::fs::delete_from_filesystem(&file_name) {
         eprintln!("Warning: Failed to delete temporary file: {}", e);
-        // TODO : do we propogate this by return or continue ?
-        // residue by uncleaned temp files can stack up
     }
 
     Ok(UploadResult {
