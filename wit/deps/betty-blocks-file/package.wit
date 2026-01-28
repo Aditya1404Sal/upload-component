@@ -1,8 +1,8 @@
-package bettyblocks:file;
+package betty-blocks:file;
 
 interface uploader {
-    use bettyblocks:data-api/data-api.{data-api-context};
-    use bettyblocks:data-api/data-api-utilities.{model, property};
+    use betty-blocks:data-api/data-api.{data-api-context};
+    use betty-blocks:data-api/data-api-utilities.{model, property};
     
     type download-headers = option<list<tuple<string, string>>>;
     
@@ -23,7 +23,7 @@ interface uploader {
 
 world file-upload {
     // Import data-api to fetch presigned URLs
-    import bettyblocks:data-api/data-api-utilities;
+    import betty-blocks:data-api/data-api-utilities;
     
     import wasi:filesystem/types@0.2.0;
     import wasi:filesystem/preopens@0.2.0;

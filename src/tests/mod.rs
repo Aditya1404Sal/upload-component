@@ -1,5 +1,5 @@
 #[cfg(test)]
-use crate::{bindings::bettyblocks::data_api::data_api_utilities::PolicyField, upload};
+use crate::{bindings::betty_blocks::data_api::data_api_utilities::PolicyField, upload};
 
 #[test]
 fn test_generate_boundary() {

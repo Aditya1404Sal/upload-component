@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 pub mod download;
+pub mod fs;
 pub mod tests;
 pub mod upload;
 
@@ -12,8 +13,8 @@ pub mod bindings {
 }
 
 use bindings::{
-    bettyblocks::data_api::{data_api::DataApiContext, data_api_utilities::Property},
-    exports::bettyblocks::file::uploader::{Guest as UploaderGuest, Model, UploadResult},
+    betty_blocks::data_api::{data_api::DataApiContext, data_api_utilities::Property},
+    exports::betty_blocks::file::uploader::{Guest as UploaderGuest, Model, UploadResult},
     exports::wasi::http::incoming_handler::Guest,
     wasi::{
         http::types::{Fields, IncomingRequest, OutgoingBody, OutgoingResponse, ResponseOutparam},
@@ -22,7 +23,7 @@ use bindings::{
 };
 
 use crate::{
-    bindings::exports::bettyblocks::file::uploader::DownloadHeaders, upload::upload_file_internal,
+    bindings::exports::betty_blocks::file::uploader::DownloadHeaders, upload::upload_file_internal,
 };
 
 // Intermediate structs for JSON deserialization
@@ -38,20 +39,10 @@ struct UploadRequestPayload {
     #[serde(alias = "encrypted_configurations")]
     encrypted_configurations: Option<Vec<String>>,
     jwt: Option<String>,
-    model: ModelName,
-    property: PropertyName,
+    model_name: String,
+    property_name: String,
     url: String,
     headers: Option<Vec<HeaderPair>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelName {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PropertyName {
-    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,11 +57,11 @@ impl Guest for Component {
     fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
         match handle_request(request) {
             Ok(message) => {
-                eprintln!("✅ {}", message);
+                eprintln!("{}", message);
                 send_response(response_out, 200, message.as_bytes());
             }
             Err(e) => {
-                eprintln!("❌ Error: {}", e);
+                eprintln!("Error: {}", e);
                 let error_msg = format!("Failed to upload file: {e}");
                 send_response(response_out, 500, error_msg.as_bytes());
             }
@@ -94,7 +85,7 @@ impl UploaderGuest for Component {
 }
 
 fn handle_request(request: IncomingRequest) -> Result<String> {
-    eprintln!("📤 Processing incoming upload request");
+    eprintln!("Processing incoming upload request");
 
     let body_content = read_request_body(request)?;
     let payload = parse_upload_request(&body_content)?;
@@ -107,10 +98,11 @@ fn handle_request(request: IncomingRequest) -> Result<String> {
         jwt: payload.jwt,
     };
     let model = Model {
-        name: payload.model.name,
+        name: payload.model_name,
     };
     let property = Property {
-        name: payload.property.name,
+        name: payload.property_name,
+        kind: "GENERIC_KIND".to_string(),
     };
 
     let headers: Option<Vec<(String, String)>> = payload

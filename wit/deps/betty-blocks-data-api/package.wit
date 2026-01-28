@@ -1,4 +1,4 @@
-package bettyblocks:data-api;
+package betty-blocks:data-api;
 
 interface data-api {
     record data-api-context {
@@ -17,6 +17,7 @@ interface data-api {
 }
 
 interface data-api-utilities {
+    use betty-blocks:types/types.{model,property};
 
     record policy-field {
         key: string,
@@ -24,14 +25,6 @@ interface data-api-utilities {
     }
 
     type policy-fields = list<policy-field>;
-
-    record model {
-        name: string,
-    }
-
-    record property {
-        name: string,
-    }
 
     record presigned-post {
         url: string,
