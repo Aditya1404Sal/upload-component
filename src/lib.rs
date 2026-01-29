@@ -21,6 +21,7 @@ use bindings::{
         io::streams::StreamError,
     },
 };
+use tracing::debug;
 
 use crate::{
     bindings::exports::betty_blocks::file::uploader::DownloadHeaders, upload::upload_file_internal,
@@ -57,11 +58,11 @@ impl Guest for Component {
     fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
         match handle_request(request) {
             Ok(message) => {
-                eprintln!("{}", message);
+                debug!("{}", message);
                 send_response(response_out, 200, message.as_bytes());
             }
             Err(e) => {
-                eprintln!("Error: {}", e);
+                debug!("Error: {}", e);
                 let error_msg = format!("Failed to upload file: {e}");
                 send_response(response_out, 500, error_msg.as_bytes());
             }
@@ -85,7 +86,7 @@ impl UploaderGuest for Component {
 }
 
 fn handle_request(request: IncomingRequest) -> Result<String> {
-    eprintln!("Processing incoming upload request");
+    debug!("Processing incoming upload request");
 
     let body_content = read_request_body(request)?;
     let payload = parse_upload_request(&body_content)?;

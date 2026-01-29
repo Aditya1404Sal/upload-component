@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use tracing::debug;
 
 use crate::bindings::{
     betty_blocks::data_api::data_api_utilities::{
@@ -32,11 +33,11 @@ pub fn upload_file_internal(
     let file_size = file_data.len() as u64;
     // Save to fs
     if let Err(e) = crate::fs::save_to_filesystem(&file_name, &file_data) {
-        eprintln!("Failed to save file to filesystem: {}", e);
+        debug!("Failed to save file to filesystem: {}", e);
         return Err(e.context(format!("Failed to save file '{}' to filesystem", file_name)));
     }
 
-    eprintln!(
+    debug!(
         "Fetching presigned POST for model: {}, property: {}",
         model.name, property.name
     );
@@ -48,7 +49,7 @@ pub fn upload_file_internal(
     // Read file from fs : with retry because what's the point of saving it otherwise :)
     let file_data_from_disk = crate::fs::read_with_retry(&file_name)?;
 
-    eprintln!(
+    debug!(
         "Uploading {} bytes to Wasabi via presigned POST",
         file_data_from_disk.len()
     );
@@ -61,7 +62,7 @@ pub fn upload_file_internal(
     ) {
         // Try to clean up the temporary file if upload failed
         if let Err(cleanup_err) = crate::fs::delete_from_filesystem(&file_name) {
-            eprintln!(
+            debug!(
                 "Warning: Failed to cleanup temporary file after upload failure: {}",
                 cleanup_err
             );
@@ -69,10 +70,10 @@ pub fn upload_file_internal(
 
         return Err(e.context("Failed to upload file to S3"));
     }
-    eprintln!("Successfully uploaded to S3");
+    debug!("Successfully uploaded to S3");
     // cleanup
     if let Err(e) = crate::fs::delete_from_filesystem(&file_name) {
-        eprintln!("Warning: Failed to delete temporary file: {}", e);
+        debug!("Warning: Failed to delete temporary file: {}", e);
     }
 
     Ok(UploadResult {
@@ -179,11 +180,11 @@ fn upload_to_presigned_post(
         .map_err(|e| anyhow::anyhow!("response err: {:?}", e))??;
 
     let status = response.status();
-    eprintln!("Status: {}", status);
+    debug!("Status: {}", status);
 
     if status >= 300 {
         let err = read_response_body(&response).unwrap_or_default();
-        eprintln!("Error body: {}", err);
+        debug!("Error body: {}", err);
         return Err(anyhow::anyhow!(
             "upload failed with status {}: {}",
             status,
@@ -191,7 +192,7 @@ fn upload_to_presigned_post(
         ));
     }
 
-    eprintln!("Presigned POST upload succeeded");
+    debug!("Presigned POST upload succeeded");
     Ok(())
 }
 

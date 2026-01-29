@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use tracing::debug;
 
 use crate::bindings::wasi::{
     http::outgoing_handler,
@@ -16,7 +17,7 @@ pub fn download_from_url(
     url: &str,
     headers: &Option<Vec<(String, String)>>,
 ) -> Result<(Vec<u8>, String, String)> {
-    eprintln!("Downloading from: {}", url);
+    debug!("Downloading from: {}", url);
 
     let parsed_url = parse_url(url)?;
     let request_headers = Fields::new();
@@ -96,7 +97,7 @@ pub fn download_from_url(
         }
     }
 
-    eprintln!("Downloaded {} bytes from URL", data.len());
+    debug!("Downloaded {} bytes from URL", data.len());
 
     Ok((data, file_name, content_type))
 }

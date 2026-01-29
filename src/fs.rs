@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::thread;
 use std::time::Duration;
+use tracing::debug;
 
 use crate::bindings::wasi::{
     filesystem::{
@@ -37,7 +38,7 @@ pub fn read_from_filesystem(filename: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("Failed to get file stats: {e:?}"))?;
 
     let file_size = stat.size;
-    eprintln!("Reading file of size: {} bytes", file_size);
+    debug!("Reading file of size: {} bytes", file_size);
 
     // Read from position 0
     let stream = file
@@ -88,7 +89,7 @@ pub fn save_to_filesystem(filename: &str, data: &[u8]) -> Result<()> {
     drop(stream);
     drop(file);
 
-    eprintln!("Saved {} bytes to {}", data.len(), filename);
+    debug!("Saved {} bytes to {}", data.len(), filename);
 
     Ok(())
 }
@@ -104,7 +105,7 @@ pub fn delete_from_filesystem(filename: &str) -> Result<()> {
     dir.unlink_file_at(filename)
         .map_err(|e| anyhow::anyhow!("Failed to delete file: {e:?}"))?;
 
-    eprintln!("Deleted temporary file: {}", filename);
+    debug!("Deleted temporary file: {}", filename);
 
     Ok(())
 }
@@ -128,12 +129,12 @@ pub fn read_with_retry(file_name: &str) -> Result<Vec<u8>> {
         match crate::fs::read_from_filesystem(file_name) {
             Ok(data) => {
                 if attempt > 1 {
-                    eprintln!("Successfully read file on attempt {}", attempt);
+                    debug!("Successfully read file on attempt {}", attempt);
                 }
                 return Ok(data);
             }
             Err(e) => {
-                eprintln!("Read attempt {} failed: {}", attempt, e);
+                debug!("Read attempt {} failed: {}", attempt, e);
                 last_error = Some(e);
 
                 if attempt < MAX_READ_RETRIES {
