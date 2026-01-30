@@ -1,7 +1,7 @@
 package betty-blocks:data-api;
 
 interface data-api {
-    record data-api-context {
+    record helper-context {
         application-id: string,      // Identifies the Betty Blocks application
         action-id: string,           // Identifies the specific action being executed
         log-id: string,              // For tracking/logging purposes
@@ -10,7 +10,7 @@ interface data-api {
     }
 
     request: func(
-        data-api-context: data-api-context, 
+        helper-context: helper-context, 
         query: string,              // GraphQL query/mutation
         variables: string           // JSON string of GraphQL variables
     ) -> result<string, string>;    // Returns JSON response or error

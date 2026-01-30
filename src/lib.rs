@@ -13,7 +13,7 @@ pub mod bindings {
 }
 
 use bindings::{
-    betty_blocks::data_api::{data_api::DataApiContext, data_api_utilities::Property},
+    betty_blocks::data_api::{data_api::HelperContext, data_api_utilities::Property},
     exports::betty_blocks::file::uploader::{Guest as UploaderGuest, Model, UploadResult},
     exports::wasi::http::incoming_handler::Guest,
     wasi::{
@@ -72,7 +72,7 @@ impl Guest for Component {
 
 impl UploaderGuest for Component {
     fn upload(
-        _data_api_context: DataApiContext,
+        _helper_context: HelperContext,
         model: Model,
         property: Property,
         download_url: String,
@@ -91,7 +91,7 @@ fn handle_request(request: IncomingRequest) -> Result<String> {
     let body_content = read_request_body(request)?;
     let payload = parse_upload_request(&body_content)?;
 
-    let _data_api_context = DataApiContext {
+    let _helper_context = HelperContext {
         application_id: payload.application_id,
         action_id: payload.action_id,
         log_id: payload.log_id,
@@ -103,7 +103,6 @@ fn handle_request(request: IncomingRequest) -> Result<String> {
     };
     let property = Property {
         name: payload.property_name,
-        kind: "GENERIC_KIND".to_string(),
     };
 
     let headers: Option<Vec<(String, String)>> = payload

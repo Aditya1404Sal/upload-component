@@ -1,7 +1,7 @@
 package betty-blocks:file;
 
 interface uploader {
-    use betty-blocks:data-api/data-api.{data-api-context};
+    use betty-blocks:data-api/data-api.{helper-context};
     use betty-blocks:data-api/data-api-utilities.{model, property};
     
     type download-headers = option<list<tuple<string, string>>>;
@@ -18,7 +18,7 @@ interface uploader {
     
     /// Upload a file from source URL to the asset store
     /// Returns a reference that can be used in create/update operations
-    upload: func(helper-context: data-api-context, model: model, property: property, download-url: string, download-headers: download-headers) -> result<upload-result, string>;
+    upload: func(helper-context: helper-context, model: model, property: property, download-url: string, download-headers: download-headers) -> result<upload-result, string>;
 }
 
 world file-upload {
