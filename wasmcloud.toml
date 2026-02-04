@@ -6,3 +6,8 @@ type = "component"
 [component]
 wit_world = "hello"
 wasm_target = "wasm32-wasip2"
+
+[overrides]
+"betty-blocks:data-api" = { path = "./wit/data-api/data.wit" }
+"betty-blocks:file" = { path = "./wit/file/file.wit" }
+"betty-blocks:types" = { path = "./wit/types/types.wit" }

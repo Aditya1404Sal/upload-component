@@ -61,6 +61,7 @@ pub fn read_from_filesystem(filename: &str) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+// Code is referred mostly from wasmtime p2-fs test components.
 pub fn save_to_filesystem(filename: &str, data: &[u8]) -> Result<()> {
     let preopens = get_directories();
     if preopens.is_empty() {

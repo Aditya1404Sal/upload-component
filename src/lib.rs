@@ -21,11 +21,9 @@ use bindings::{
         io::streams::StreamError,
     },
 };
-use tracing::debug;
 
-use crate::{
-    bindings::exports::betty_blocks::file::uploader::DownloadHeaders, upload::upload_file_internal,
-};
+use crate::bindings::exports::betty_blocks::file::uploader::DownloadHeaders;
+use crate::upload::upload_file_internal;
 
 // Intermediate structs for JSON deserialization
 #[derive(Debug, Deserialize)]
@@ -58,11 +56,9 @@ impl Guest for Component {
     fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
         match handle_request(request) {
             Ok(message) => {
-                debug!("{}", message);
                 send_response(response_out, 200, message.as_bytes());
             }
             Err(e) => {
-                debug!("Error: {}", e);
                 let error_msg = format!("Failed to upload file: {e}");
                 send_response(response_out, 500, error_msg.as_bytes());
             }
@@ -78,17 +74,14 @@ impl UploaderGuest for Component {
         download_url: String,
         download_headers: DownloadHeaders,
     ) -> Result<UploadResult, String> {
-        // JWT validation can go here, before handoff to internal
-        // will use the data-api-context for the Auth/AuthZ for validation it
         upload_file_internal(model, property, download_url, download_headers)
             .map_err(|e| e.to_string())
     }
 }
 
 fn handle_request(request: IncomingRequest) -> Result<String> {
-    debug!("Processing incoming upload request");
-
     let body_content = read_request_body(request)?;
+
     let payload = parse_upload_request(&body_content)?;
 
     let _helper_context = HelperContext {
@@ -108,6 +101,7 @@ fn handle_request(request: IncomingRequest) -> Result<String> {
     let headers: Option<Vec<(String, String)>> = payload
         .headers
         .map(|vec| vec.into_iter().map(|h| (h.key, h.value)).collect());
+
     let result = upload::upload_file_internal(model, property, payload.url, headers)?;
 
     Ok(format!(

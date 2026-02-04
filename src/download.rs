@@ -1,73 +1,40 @@
 use anyhow::{Context, Result};
-use tracing::debug;
+use tracing::{debug, error};
+use waki::{header::HeaderName, Client, Response};
 
-use crate::bindings::wasi::{
-    http::outgoing_handler,
-    http::types::{Fields, Method, OutgoingRequest, Scheme},
-    io::streams::StreamError,
+use crate::bindings::wasi::filesystem::{
+    preopens::get_directories,
+    types::{DescriptorFlags, OpenFlags, PathFlags},
 };
 
-pub struct ParsedUrl {
-    pub(crate) scheme: Scheme,
-    pub(crate) authority: String,
-    pub(crate) path_and_query: String,
-}
+const CHUNK_SIZE: u64 = 65536;
 
-pub fn download_from_url(
+pub fn download_and_stream_to_disk(
+    client: &Client,
     url: &str,
     headers: &Option<Vec<(String, String)>>,
-) -> Result<(Vec<u8>, String, String)> {
+) -> Result<(u64, String, String)> {
     debug!("Downloading from: {}", url);
-
-    let parsed_url = parse_url(url)?;
-    let request_headers = Fields::new();
 
     let (file_name, content_type) =
         extract_file_info_from_url(url).context("Failed to extract file info from URL")?;
 
+    let mut request = client.get(url);
+
     // Add custom headers if provided
     if let Some(custom_headers) = headers {
         for (key, value) in custom_headers {
-            request_headers
-                .append(&key.to_lowercase(), value.as_bytes())
-                .map_err(|_| anyhow::anyhow!("Failed to set header: {}", key))?;
+            let header_name = HeaderName::try_from(key.to_lowercase())
+                .map_err(|e| anyhow::anyhow!("Invalid header name '{}': {}", key, e))?;
+            request = request.header(header_name, value.as_str());
         }
     }
 
-    let outgoing_request = OutgoingRequest::new(request_headers);
-
-    outgoing_request
-        .set_method(&Method::Get)
-        .map_err(|_| anyhow::anyhow!("Failed to set method"))?;
-
-    outgoing_request
-        .set_scheme(Some(&parsed_url.scheme))
-        .map_err(|_| anyhow::anyhow!("Failed to set scheme"))?;
-
-    outgoing_request
-        .set_authority(Some(&parsed_url.authority))
-        .map_err(|_| anyhow::anyhow!("Failed to set authority"))?;
-
-    outgoing_request
-        .set_path_with_query(Some(&parsed_url.path_and_query))
-        .map_err(|_| anyhow::anyhow!("Failed to set path"))?;
-
-    let future_response = outgoing_handler::handle(outgoing_request, None)
+    let response = request
+        .send()
         .map_err(|e| anyhow::anyhow!("Failed to send HTTP request: {e:?}"))?;
 
-    let incoming_response = match future_response.get() {
-        Some(result) => result.map_err(|e| anyhow::anyhow!("HTTP request failed: {e:?}"))?,
-        None => {
-            future_response.subscribe().block();
-            future_response
-                .get()
-                .ok_or_else(|| anyhow::anyhow!("Failed to get response"))?
-                .map_err(|e| anyhow::anyhow!("HTTP request failed: {e:?}"))?
-        }
-    }
-    .map_err(|e| anyhow::anyhow!("HTTP response error: {e:?}"))?;
-
-    let status = incoming_response.status();
+    let status = response.status_code();
     if !(200..300).contains(&status) {
         return Err(anyhow::anyhow!(
             "HTTP request failed with status code: {}",
@@ -75,56 +42,115 @@ pub fn download_from_url(
         ));
     }
 
-    let response_body = incoming_response
-        .consume()
-        .map_err(|_| anyhow::anyhow!("Failed to consume response"))?;
+    let file_size = stream_response_to_file(&response, &file_name)?;
 
-    let input_stream = response_body
-        .stream()
-        .map_err(|_| anyhow::anyhow!("Failed to get response stream"))?;
+    Ok((file_size, file_name, content_type))
+}
 
-    let mut data = Vec::new();
+fn stream_response_to_file(response: &Response, filename: &str) -> Result<u64> {
+    let preopens = get_directories();
+
+    if preopens.is_empty() {
+        error!("stream_response_to_file: No preopened directories available!");
+        return Err(anyhow::anyhow!("No preopened directories available"));
+    }
+
+    let (dir, _dir_name) = &preopens[0];
+
+    // Open file for writing with CREATE flag
+    let file = dir
+        .open_at(
+            PathFlags::empty(),
+            filename,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE,
+            DescriptorFlags::WRITE,
+        )
+        .map_err(|e| {
+            error!("stream_response_to_file: Failed to open file for writing: {e:?}");
+            anyhow::anyhow!("Failed to open file for writing: {e:?}")
+        })?;
+
+    let write_stream = file.write_via_stream(0).map_err(|e| {
+        error!("stream_response_to_file: Failed to get write stream: {e:?}");
+        anyhow::anyhow!("Failed to get write stream: {e:?}")
+    })?;
+
+    let mut total_bytes: u64 = 0;
+    let mut chunk_count: u64 = 0;
+
     loop {
-        match input_stream.blocking_read(8192) {
-            Ok(chunk) if chunk.is_empty() => break,
-            Ok(chunk) => data.extend_from_slice(&chunk),
-            Err(StreamError::Closed) => break,
+        let chunk_result = response.chunk(CHUNK_SIZE);
+        match chunk_result {
+            Ok(Some(chunk)) if !chunk.is_empty() => {
+                chunk_count += 1;
+
+                if let Err(e) = write_chunk_to_stream(&write_stream, &chunk) {
+                    error!(
+                        "stream_response_to_file: Failed to write chunk {}: {}",
+                        chunk_count, e
+                    );
+                    drop(write_stream);
+                    drop(file);
+                    let _ = dir.unlink_file_at(filename);
+                    return Err(e.context(format!("Failed to write chunk {}", chunk_count)));
+                }
+                total_bytes += chunk.len() as u64;
+            }
+            Ok(Some(_empty_chunk)) => {
+                break;
+            }
+            Ok(None) => {
+                break;
+            }
             Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Stream error while reading response: {e:?}"
-                ))
+                error!("stream_response_to_file: Failed to read response chunk: {e:?}");
+                drop(write_stream);
+                drop(file);
+                let _ = dir.unlink_file_at(filename);
+                return Err(anyhow::anyhow!("Failed to read response chunk: {e:?}"));
             }
         }
     }
 
-    debug!("Downloaded {} bytes from URL", data.len());
+    // flush, close
+    write_stream.flush().map_err(|e| {
+        error!("stream_response_to_file: Failed to flush write stream: {e:?}");
+        anyhow::anyhow!("Failed to flush write stream: {e:?}")
+    })?;
 
-    Ok((data, file_name, content_type))
+    drop(write_stream);
+    drop(file);
+
+    Ok(total_bytes)
 }
 
-pub fn parse_url(url: &str) -> Result<ParsedUrl> {
-    let (scheme_str, rest) = url
-        .split_once("://")
-        .ok_or_else(|| anyhow::anyhow!("Invalid URL: missing scheme"))?;
-
-    let scheme = match scheme_str.to_lowercase().as_str() {
-        "http" => Scheme::Http,
-        "https" => Scheme::Https,
-        other => Scheme::Other(other.to_string()),
-    };
-
-    let (authority, path_and_query) = if let Some(idx) = rest.find('/') {
-        let (auth, path) = rest.split_at(idx);
-        (auth.to_string(), path.to_string())
-    } else {
-        (rest.to_string(), "/".to_string())
-    };
-
-    Ok(ParsedUrl {
-        scheme,
-        authority,
-        path_and_query,
-    })
+fn write_chunk_to_stream(
+    stream: &crate::bindings::wasi::io::streams::OutputStream,
+    chunk: &[u8],
+) -> Result<()> {
+    let mut offset = 0;
+    while offset < chunk.len() {
+        let to_write = &chunk[offset..];
+        match stream.check_write() {
+            Ok(0) => {
+                stream.subscribe().block();
+                continue;
+            }
+            Ok(available) => {
+                let write_size = std::cmp::min(available as usize, to_write.len());
+                stream.write(&to_write[..write_size]).map_err(|e| {
+                    error!("write_chunk_to_stream: Write failed: {e:?}");
+                    anyhow::anyhow!("Write failed: {e:?}")
+                })?;
+                offset += write_size;
+            }
+            Err(e) => {
+                error!("write_chunk_to_stream: check_write failed: {e:?}");
+                return Err(anyhow::anyhow!("check_write failed: {e:?}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn extract_file_info_from_url(url: &str) -> Result<(String, String)> {

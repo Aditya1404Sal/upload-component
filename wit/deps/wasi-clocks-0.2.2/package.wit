@@ -1,4 +1,4 @@
-package wasi:clocks@0.2.0;
+package wasi:clocks@0.2.2;
 
 interface wall-clock {
   record datetime {
@@ -12,7 +12,7 @@ interface wall-clock {
 }
 
 interface monotonic-clock {
-  use wasi:io/poll@0.2.0.{pollable};
+  use wasi:io/poll@0.2.2.{pollable};
 
   type instant = u64;
 

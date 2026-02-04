@@ -1,0 +1,28 @@
+package betty-blocks:file;
+
+interface uploader {
+    use betty-blocks:data-api/data-api.{helper-context};
+    use betty-blocks:data-api/data-api-utilities.{model, property};
+    
+    type download-headers = option<list<tuple<string, string>>>;
+    
+    /// Result of a file upload operation
+    record upload-result {
+        /// File reference that can be used in create/update operations
+        reference: string,
+        /// Size of the uploaded file in bytes
+        file-size: u64,
+        /// Optional message with additional details
+        message: option<string>,
+    }
+    
+    /// Upload a file from source URL to the asset store
+    /// Returns a reference that can be used in create/update operations
+    upload: func(helper-context: helper-context, model: model, property: property, download-url: string, download-headers: download-headers) -> result<upload-result, string>;
+}
+
+world file-upload {
+    // Import data-api to fetch presigned URLs
+    import betty-blocks:data-api/data-api-utilities;
+    export uploader;
+}
